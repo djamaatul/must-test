@@ -7,12 +7,17 @@ import (
 	"must-test/tests/Practical/src/repositories"
 	"must-test/tests/Practical/src/utils"
 	"net/http"
+	"slices"
 	"time"
 )
 
 type GetSummaryStruct struct {
-	BookingList       []repositories.Booking     `json:"listBooking"`
-	MasterConsumption []repositories.Consumption `json:"masterConsumption"`
+	RoomName           string         `json:"roomName"`
+	PercentageUsage    float64        `json:"percentageUsage"`
+	NominalConsumption int            `json:"nominalConsumption"`
+	TotalParticipants  int            `json:"totalParticipants"`
+	Consumptions       map[string]int `json:"consumptions"`
+	Currency           string         `json:"currency"`
 }
 
 func GetSummary(w http.ResponseWriter, r *http.Request) {
@@ -31,12 +36,6 @@ func GetSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Println(periode.GoString())
-
-	w.WriteHeader(http.StatusOK)
-
-	w.Header().Set("Content-Type", "application/json")
-
 	bookingListChan := make(chan []repositories.Booking)
 	masterConsumptionChan := make(chan []repositories.Consumption)
 
@@ -44,14 +43,51 @@ func GetSummary(w http.ResponseWriter, r *http.Request) {
 	go repositories.GetMasterConsumption(masterConsumptionChan)
 
 	bookingList := <-bookingListChan
+	bookingList = slices.DeleteFunc(bookingList, func(e repositories.Booking) bool {
+		startTime, err := time.Parse("2006-01", e.StartTime)
+		if err != nil {
+			return false
+		}
+		return !(startTime.Day() == periode.Day() && startTime.Month() == periode.Month() && startTime.Year() == periode.Year())
+	})
 	masterConsumption := <-masterConsumptionChan
 
-	var response GetSummaryStruct = GetSummaryStruct{
-		BookingList:       bookingList,
-		MasterConsumption: masterConsumption,
+	roomsMap := make(map[string]*GetSummaryStruct)
+
+	for _, booking := range bookingList {
+		if _, exists := roomsMap[booking.RoomName]; !exists {
+			roomsMap[booking.RoomName] = &GetSummaryStruct{
+				RoomName:          booking.RoomName,
+				Consumptions:      make(map[string]int),
+				Currency:          "Rp",
+				TotalParticipants: 0,
+			}
+		}
+
+		roomsMap[booking.RoomName].TotalParticipants += booking.Participants
+
+		for _, consumption := range booking.ListConsumption {
+			indexConsumption := slices.IndexFunc(masterConsumption, func(e repositories.Consumption) bool {
+				return e.Name == consumption.Name
+			})
+			roomsMap[booking.RoomName].NominalConsumption += masterConsumption[indexConsumption].MaxPrice * booking.Participants
+			roomsMap[booking.RoomName].Consumptions[consumption.Name] += booking.Participants
+		}
 	}
 
-	wr, _ := json.Marshal(response)
+	var roomsSlice []*GetSummaryStruct = []*GetSummaryStruct{}
 
+	for _, room := range roomsMap {
+		roomsSlice = append(roomsSlice, room)
+	}
+
+	fmt.Println(periode)
+	wr, _ := json.Marshal(map[string]any{
+		"dataRecord": roomsSlice,
+		"message":    "Sukses",
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	w.Write(wr)
 }
